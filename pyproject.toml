@@ -27,5 +27,13 @@ errant_compare = "errant.commands.compare_m2:main"
 errant_m2 = "errant.commands.m2_to_m2:main"
 errant_parallel = "errant.commands.parallel_to_m2:main"
 
+[project.optional-dependencies]
+sl = [
+    "sl-core-news-sm",
+]
+
 [tool.hatch.build.targets.wheel]
 include = ["errant"]
+
+[tool.uv.sources]
+sl-core-news-sm = { url = "https://github.com/explosion/spacy-models/releases/download/sl_core_news_sm-3.8.0/sl_core_news_sm-3.8.0-py3-none-any.whl" }

@@ -7,7 +7,7 @@ def main():
     args = parse_args()
     print("Loading resources...")
     # Load Errant
-    annotator = errant.load("en")
+    annotator = errant.load(args.lang, model=args.model)
 
     print("Processing parallel files...")
     # Process an arbitrary number of files line by line simultaneously. Python 3.3+
@@ -81,6 +81,17 @@ def parse_args():
             "all-equal: Merge adjacent same-type non-matches: MSSDI -> M, SS, D, I",
         choices=["rules", "all-split", "all-merge", "all-equal"],
         default="rules")
+    parser.add_argument(
+        "-lang",
+        help="The language of the input text (default: en).",
+        choices=["en", "sl"],
+        default="en")
+    parser.add_argument(
+        "-model",
+        help="Override the spacy model used to tag/parse the text, e.g. "
+            "sl_core_news_md (default: <lang>_core_web_sm for en, "
+            "<lang>_core_news_sm for sl).",
+        default=None)
     args=parser.parse_args()
     return args
 
