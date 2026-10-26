@@ -1,3 +1,4 @@
+from errant import conllu
 from errant.alignment import Alignment
 from errant.edit import Edit
 from spacy.tokens import Doc
@@ -25,6 +26,17 @@ class Annotator:
         # POS tag and parse
         text = self.nlp(text)
         return text
+
+    # Input: A list of CoNLL-U rows for one sentence; see errant.conllu
+    # Output: A spacy Doc carrying the pre-tagged annotation (spacy is not run)
+    def parse_conllu(self, rows):
+        return conllu.to_doc(self.nlp.vocab, rows)
+
+    # Input: A path to a pre-tagged CoNLL-U file
+    # Output: A generator of spacy Docs, one per sentence
+    def read_conllu(self, path):
+        for rows in conllu.read_conllu(path):
+            yield self.parse_conllu(rows)
 
     # Input 1: An original text string parsed by spacy
     # Input 2: A corrected text string parsed by spacy

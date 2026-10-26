@@ -1,12 +1,29 @@
+from pathlib import Path
 from rapidfuzz.distance import Levenshtein
 import spacy.symbols as POS
+
+base_dir = Path(__file__).resolve().parent
+
+def load_word_list(path):
+    with open(path, encoding="utf-8") as f:
+        return set(line.rstrip("\n") for line in f)
+
+# Sloleks 3.1 wordforms (non-standard-tagged entries excluded at build time)
+sloleks = load_word_list(base_dir/"resources"/"sloleks_wordforms.txt")
+
+# Input: A token string
+# Output: Boolean; the word is a known Sloleks wordform
+def in_sloleks(word):
+    if word in sloleks:
+        return True
+    if word[:1].isupper() and word[0].lower() + word[1:] in sloleks:
+        return True
+    return False
 
 # Classifier resources
 nlp = None
 # Open class coarse Spacy POS tags
 open_pos1 = {POS.ADJ, POS.ADV, POS.NOUN, POS.VERB}
-# Open class coarse Spacy POS tags (strings)
-open_pos2 = {"ADJ", "ADV", "NOUN", "VERB"}
 # Rare POS tags that make uninformative error categories
 rare_pos = {"INTJ", "NUM", "SYM", "X"}
 # Universal Dependencies relations that correspond to a coarse POS-like category
@@ -19,6 +36,42 @@ dep_map = {
 # Dependency relations that mark an auxiliary (covers both "aux:pass" (UD v2)
 # and the older "auxpass" subtype spelling)
 aux_deps = {"aux", "auxpass", "aux:pass"}
+# Single-letter prepositions confusable by voicing/pronunciation
+prep_confusions = {frozenset({"s", "z"}), frozenset({"k", "h"}), frozenset({"u", "v"})}
+# Lemma similarity above which two lemmas count as "close enough" for M-POS,
+# tolerating lemmatizer noise instead of requiring an exact match
+LEMMA_SIM_THRESHOLD = 0.8
+# Divisor for scaling the allowed surface-text edit distance with word
+# length (allowed = max(1, len // TEXT_EDIT_SCALE)), so short words aren't
+# held to the same absolute distance as long ones
+TEXT_EDIT_SCALE = 3
+
+# Input: A resolved POS string
+# Output: The one-sided category label ("O-" for punctuation, "S-" otherwise)
+def label_pos(pos):
+    return "O-PUNCT" if pos == "PUNCT" else "S-" + pos
+
+# Input 1: A string
+# Input 2: A string
+# Output: Boolean; edit distance small relative to word length. Used for
+# spelling, where the actual written characters are what matters.
+def close_text(a, b):
+    a, b = a.lower(), b.lower()
+    if a == b:
+        return True
+    allowed = max(1, max(len(a), len(b)) // TEXT_EDIT_SCALE)
+    return Levenshtein.distance(a, b) <= allowed
+
+# Input 1: Spacy orig token
+# Input 2: Spacy cor token
+# Output: Boolean; the lemmas are identical or similar enough to count as
+# the same word. Used for morphology, where the abstract lemma matters, not
+# the surface spelling; tolerates lemmatizer noise rather than requiring an
+# exact match.
+def close_lemma(o_tok, c_tok):
+    if o_tok.lemma == c_tok.lemma:
+        return True
+    return Levenshtein.normalized_similarity(o_tok.lemma_.lower(), c_tok.lemma_.lower()) > LEMMA_SIM_THRESHOLD
 
 # Input: An Edit object
 # Output: The same Edit object with an updated error type
@@ -87,16 +140,16 @@ def get_one_sided_type(toks):
     pos_list, dep_list = get_edit_info(toks)
     # Auxiliary verbs
     if set(dep_list).issubset(aux_deps):
-        return "VERB:TENSE"
+        return "M-VERB"
     # POS-based tags. Ignores rare, uninformative categories
     if len(set(pos_list)) == 1 and pos_list[0] not in rare_pos:
-        return pos_list[0]
+        return label_pos(pos_list[0])
     # More POS-based tags using special dependency labels
     if len(set(dep_list)) == 1 and dep_list[0] in dep_map.keys():
-        return dep_map[dep_list[0]]
+        return label_pos(dep_map[dep_list[0]])
     # Verb-related non-finite constructions
     if set(pos_list) == {"PART", "VERB"}:
-        return "VERB"
+        return label_pos("VERB")
     # Tricky cases
     else:
         return "OTHER"
@@ -111,94 +164,95 @@ def get_two_sided_type(o_toks, c_toks):
 
     # Orthography; i.e. whitespace and/or case errors.
     if only_orth_change(o_toks, c_toks):
-        return "ORTH"
+        return get_orth_subtype(o_toks, c_toks)
     # Word Order; only matches exact reordering.
     if exact_reordering(o_toks, c_toks):
-        return "WO"
+        return "S-WO"
+    # Single-letter preposition confusion; both sides are valid Sloleks
+    # entries so the lemma/Sloleks checks below can't catch these.
+    if is_prep_confusion(o_toks, c_toks):
+        return "O-SPELL"
 
     # 1:1 replacements (very common)
     if len(o_toks) == len(c_toks) == 1:
-        # 1. MORPHOLOGY
-        # Only ADJ, ADV, NOUN and VERB can have inflectional changes.
-        if o_toks[0].lemma == c_toks[0].lemma and \
-                o_pos[0] in open_pos2 and \
-                c_pos[0] in open_pos2:
-            # Same POS on both sides
-            if o_pos == c_pos:
-                # Adjective form; e.g. comparatives
-                if o_pos[0] == "ADJ":
-                    return "ADJ:FORM"
-                # Noun number
-                if o_pos[0] == "NOUN":
-                    return "NOUN:NUM"
-                # Verbs - rely on the dependency parse; fine-grained tense/
-                # aspect/mood distinctions need Slovene-tag-aware rules.
-                if o_pos[0] == "VERB":
-                    if preceded_by_aux(o_toks, c_toks):
-                        return "VERB:FORM"
-                    if o_dep[0].startswith("aux") and \
-                            c_dep[0].startswith("aux"):
-                        return "VERB:TENSE"
-            # Use dep labels to find some more ADJ:FORM
-            if set(o_dep+c_dep).issubset({"amod"}):
-                return "ADJ:FORM"
-            # Tricky cases that all have the same lemma.
-            else:
-                return "MORPH"
+        o_in, c_in = in_sloleks(o_toks[0].text), in_sloleks(c_toks[0].text)
 
-        # 2. GENERAL
+        if o_in and c_in:
+            # 1. MORPHOLOGY: both confirmed real words, close lemma, same POS
+            if close_lemma(o_toks[0], c_toks[0]) and o_pos[0] == c_pos[0]:
+                return "O-PUNCT" if o_pos[0] == "PUNCT" else "M-" + o_pos[0]
+            # 2. VOCABULARY: both confirmed real words, not the same word
+            return "O-PUNCT" if c_pos[0] == "PUNCT" else "V-" + c_pos[0]
+
+        if o_in != c_in:
+            # 3. SPELLING: one confirmed word, one not, close surface text ->
+            # same underlying word, just misspelled. Compared on the surface
+            # text rather than the lemma: a misspelling often confuses the
+            # lemmatizer/tagger too, so the lemma can diverge even when the
+            # written forms themselves are clearly close.
+            if close_text(o_toks[0].text, c_toks[0].text):
+                return "O-SPELL"
+            # 4. VOCABULARY: one confirmed word, one not, not the same word
+            return "O-PUNCT" if c_pos[0] == "PUNCT" else "V-" + c_pos[0]
+
+        # neither in Sloleks -> fall through to the GENERAL/STRING
+        # SIMILARITY fallback below
+
+        # 4. GENERAL
         # Auxiliaries with different lemmas
         if o_dep[0].startswith("aux") and c_dep[0].startswith("aux"):
-            return "VERB:TENSE"
+            return "M-VERB"
         # POS-based tags. Some of these are context sensitive mispellings.
         if o_pos == c_pos and o_pos[0] not in rare_pos:
-            return o_pos[0]
+            return "O-PUNCT" if o_pos[0] == "PUNCT" else "V-" + o_pos[0]
         # Some dep labels map to POS-based tags.
         if o_dep == c_dep and o_dep[0] in dep_map.keys():
-            return dep_map[o_dep[0]]
+            mapped = dep_map[o_dep[0]]
+            return "O-PUNCT" if mapped == "PUNCT" else "V-" + mapped
         # Can use dep labels to resolve DET + PRON combinations.
         if set(o_pos+c_pos) == {"DET", "PRON"}:
             # DET cannot be a subject or object.
             if c_dep[0] in {"nsubj", "nsubj:pass", "obj", "iobj", "obl"}:
-                return "PRON"
+                return "V-PRON"
         # NUM and DET are usually DET; e.g. a <-> one
         if set(o_pos+c_pos) == {"NUM", "DET"}:
-            return "DET"
+            return "V-DET"
 
-        # 3. STRING SIMILARITY
+        # 5. STRING SIMILARITY
         # Generic Levenshtein-based fallback; no language-specific tuning.
         if o_toks[0].text.isalpha() and c_toks[0].text.isalpha():
             str_sim = Levenshtein.normalized_similarity(o_toks[0].lower_, c_toks[0].lower_)
             if str_sim > 0.55 and c_pos[0] not in rare_pos:
-                return "SPELL"
+                return "O-SPELL"
         # Tricky cases
         return "OTHER"
 
     # Multi-token replacements (uncommon)
     # All auxiliaries
     if set(o_dep+c_dep).issubset(aux_deps):
-        return "VERB:TENSE"
+        return "M-VERB"
     # All same POS
     if len(set(o_pos+c_pos)) == 1:
         # Final verbs with the same lemma are tense; e.g. eat -> has eaten
         if o_pos[0] == "VERB" and \
                 o_toks[-1].lemma == c_toks[-1].lemma:
-            return "VERB:TENSE"
+            return "M-VERB"
         # POS-based tags.
         elif o_pos[0] not in rare_pos:
-            return o_pos[0]
+            return "O-PUNCT" if o_pos[0] == "PUNCT" else "V-" + o_pos[0]
     # All same special dep labels.
     if len(set(o_dep+c_dep)) == 1 and \
             o_dep[0] in dep_map.keys():
-        return dep_map[o_dep[0]]
+        mapped = dep_map[o_dep[0]]
+        return "O-PUNCT" if mapped == "PUNCT" else "V-" + mapped
     # Verb-related non-finite constructions.
     if set(o_pos+c_pos) == {"PART", "VERB"}:
         # Final verbs with the same lemma are form; e.g. to eat -> eating
         if o_toks[-1].lemma == c_toks[-1].lemma:
-            return "VERB:FORM"
+            return "M-VERB"
         # Remaining edits are often verb
         else:
-            return "VERB"
+            return "V-VERB"
 
     # Tricky cases.
     return "OTHER"
@@ -215,6 +269,16 @@ def only_orth_change(o_toks, c_toks):
 
 # Input 1: Spacy orig tokens
 # Input 2: Spacy cor tokens
+# Output: The orthography subtype string; only_orth_change() must be true
+def get_orth_subtype(o_toks, c_toks):
+    o_exact = "".join(o.text for o in o_toks)
+    c_exact = "".join(c.text for c in c_toks)
+    if o_exact == c_exact:
+        return "O-MERGE" if len(o_toks) > len(c_toks) else "O-SPLIT"
+    return "O-CAP"
+
+# Input 1: Spacy orig tokens
+# Input 2: Spacy cor tokens
 # Output: Boolean; the tokens are exactly the same but in a different order
 def exact_reordering(o_toks, c_toks):
     # Sorting lets us keep duplicates.
@@ -224,40 +288,12 @@ def exact_reordering(o_toks, c_toks):
         return True
     return False
 
-# Input 1: An original text spacy token.
-# Input 2: A corrected text spacy token.
-# Output: Boolean; both tokens have a dependant auxiliary verb.
-def preceded_by_aux(o_tok, c_tok):
-    # If the toks are aux, we need to check if they are the first aux.
-    if o_tok[0].dep_.startswith("aux") and c_tok[0].dep_.startswith("aux"):
-        # Find the parent verb
-        o_head = o_tok[0].head
-        c_head = c_tok[0].head
-        # Find the children of the parent
-        o_children = o_head.children
-        c_children = c_head.children
-        # Check the orig children.
-        for o_child in o_children:
-            # Look at the first aux...
-            if o_child.dep_.startswith("aux"):
-                # Check if the string matches o_tok
-                if o_child.text != o_tok[0].text:
-                    # If it doesn't, o_tok is not first so check cor
-                    for c_child in c_children:
-                        # Find the first aux in cor...
-                        if c_child.dep_.startswith("aux"):
-                            # If that doesn't match either, neither are first aux
-                            if c_child.text != c_tok[0].text:
-                                return True
-                            # Break after the first cor aux
-                            break
-                # Break after the first orig aux.
-                break
-    # Otherwise, the toks are main verbs so we need to look for any aux.
-    else:
-        o_deps = [o_dep.dep_ for o_dep in o_tok[0].children]
-        c_deps = [c_dep.dep_ for c_dep in c_tok[0].children]
-        if any(d.startswith("aux") for d in o_deps):
-            if any(d.startswith("aux") for d in c_deps):
-                return True
+# Input 1: Spacy orig tokens
+# Input 2: Spacy cor tokens
+# Output: Boolean; both sides are single-letter s/z, k/h or u/v prepositions
+def is_prep_confusion(o_toks, c_toks):
+    if len(o_toks) == 1 and len(c_toks) == 1:
+        o_low, c_low = o_toks[0].text.lower(), c_toks[0].text.lower()
+        if len(o_low) == 1 and len(c_low) == 1:
+            return frozenset({o_low, c_low}) in prep_confusions
     return False

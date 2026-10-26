@@ -94,8 +94,10 @@ def parse_args():
         help="Show error category scores.\n"
             "1: Only show operation tier scores; e.g. R.\n"
             "2: Only show main tier scores; e.g. NOUN.\n"
-            "3: Show all category scores; e.g. R:NOUN.",
-        choices=[1, 2, 3],
+            "3: Show all category scores; e.g. R:NOUN.\n"
+            "4: Only show level tier scores; e.g. M for R:M-NOUN.\n"
+            "   Types without a level prefix (e.g. OTHER) are kept as is.",
+        choices=[1, 2, 3, 4],
         type=int)
     args = parser.parse_args()
     return args
@@ -335,6 +337,7 @@ def merge_dict(dict1, dict2):
 # Input 1: A dict; key is error cat, value is counts for [tp, fp, fn]
 # Input 2: Integer value denoting level of error category granularity.
 # 1: Operation tier; e.g. M, R, U.  2: Main tier; e.g. NOUN, VERB  3: Everything.
+# 4: Level tier; e.g. O, M, V, S from Slovene types like R:M-NOUN.
 # Output: A dictionary of category TP, FP and FN based on Input 2.
 def processCategories(cat_dict, setting):
     # Otherwise, do some processing.
@@ -355,6 +358,13 @@ def processCategories(cat_dict, setting):
                 proc_cat_dict[cat[2:]] = [x+y for x, y in zip(proc_cat_dict[cat[2:]], cnt)]
             else:
                 proc_cat_dict[cat[2:]] = cnt
+        # Level prefix of the main tier only; e.g. R:M-NOUN -> M
+        elif setting == 4:
+            level = cat[2:].split("-")[0]
+            if level in proc_cat_dict.keys():
+                proc_cat_dict[level] = [x+y for x, y in zip(proc_cat_dict[level], cnt)]
+            else:
+                proc_cat_dict[level] = cnt
         # All error category combinations
         else:
             return cat_dict

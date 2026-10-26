@@ -77,6 +77,15 @@ Three main commands are provided with ERRANT: `errant_parallel`, `errant_m2` and
 	 errant_parallel -orig <orig_file> -cor <cor_file1> [<cor_file2> ...] -out <out_m2>
 	 ```
 
+     Instead of plain text, the input can also be pre-tagged [CoNLL-U](https://universaldependencies.org/format.html) produced by any tool (e.g. CLASSLA, Trankit, UDPipe). Use `-format conllu`; spacy is then not run and the CoNLL-U FORM, LEMMA, UPOS, XPOS, FEATS, HEAD and DEPREL are used as they are (`-model` is ignored, `-tok` is not allowed).
+	 ```
+	 errant_parallel -lang sl -format conllu -orig <orig.conllu> -cor <cor1.conllu> [<cor2.conllu> ...] -out <out_m2>
+	 ```
+     - Sentences are paired by their order in each file, so all files must contain the same number of sentences. Run the tagger on pre-segmented input (one line = one sentence) so it does not split or join sentences, and remove empty corrections first.
+     - ERRANT works on syntactic words: multi-word token ranges (e.g. `3-4 vanj`) and empty nodes are skipped, so the M2 `S` line and edit offsets refer to the split words (`v nj`).
+     - `SpaceAfter=No` in MISC is used to rebuild the surface text.
+     - For English, XPOS must contain Penn Treebank tags, since the English classifier relies on them.
+
 2. `errant_m2`  
 
      This is a variant of `errant_parallel` that operates on an M2 file instead of parallel text files. This makes it easier to reprocess existing M2 files. You must also specify whether you want to use gold or auto edits; i.e. `-gold` will only classify the existing edits, while `-auto` will extract and classify automatic edits. In both settings, uncorrected edits and noops are preserved.  
@@ -87,7 +96,7 @@ Three main commands are provided with ERRANT: `errant_parallel`, `errant_m2` and
 
 3. `errant_compare`  
 
-     This is the evaluation command that compares a hypothesis M2 file against a reference M2 file. The default behaviour evaluates the hypothesis overall in terms of span-based correction. The `-cat {1,2,3}` flag can be used to evaluate error types at increasing levels of granularity, while the `-ds` or `-dt` flag can be used to evaluate in terms of span-based or token-based detection (i.e. ignoring the correction). All scores are presented in terms of Precision, Recall and F-score (default: F0.5), and counts for True Positives (TP), False Positives (FP) and False Negatives (FN) are also shown.  
+     This is the evaluation command that compares a hypothesis M2 file against a reference M2 file. The default behaviour evaluates the hypothesis overall in terms of span-based correction. The `-cat {1,2,3}` flag can be used to evaluate error types at increasing levels of granularity (`-cat 4` groups Slovene types by level: O, M, V, S), while the `-ds` or `-dt` flag can be used to evaluate in terms of span-based or token-based detection (i.e. ignoring the correction). All scores are presented in terms of Precision, Recall and F-score (default: F0.5), and counts for True Positives (TP), False Positives (FP) and False Negatives (FN) are also shown.  
 	 Examples:
 	 ```
      errant_compare -hyp <hyp_m2> -ref <ref_m2> 
@@ -136,6 +145,18 @@ An Annotator object is the main interface for ERRANT.
 
 `annotator`.**parse**(string, tokenise=False)  
 Lemmatise, POS tag, and parse a text string with spacy. Set `tokenise` to True to also word tokenise with spacy. Returns a spacy Doc object.
+
+`annotator`.**read_conllu**(path)  
+Read a pre-tagged CoNLL-U file and yield one spacy Doc per sentence, carrying the CoNLL-U annotation (spacy is not run). Only the vocab of the annotator's `nlp` is used, so a blank pipeline is enough. `annotator`.**parse_conllu**(rows) does the same for a single sentence read with `errant.conllu.read_conllu`.
+
+```
+import errant
+import spacy
+
+annotator = errant.load('sl', nlp=spacy.blank('sl'))
+for orig, cor in zip(annotator.read_conllu('orig.conllu'), annotator.read_conllu('cor.conllu')):
+    edits = annotator.annotate(orig, cor)
+```
 
 `annotator`.**align**(orig, cor, lev=False)  
 Align spacy-parsed original and corrected text. The default uses a linguistically-enhanced Damerau-Levenshtein alignment, but the `lev` flag can be used for a standard Levenshtein alignment. Returns an Alignment object.

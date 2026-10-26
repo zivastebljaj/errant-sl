@@ -11,6 +11,8 @@ _model_family = {"en": "core_web", "sl": "core_news"}
 # Load an ERRANT Annotator object for a given language
 # Input 3: An optional spacy model name override, e.g. "sl_core_news_md",
 # to use a different sized/named spacy model than the language default.
+# For pre-tagged CoNLL-U input only the vocab is used, so a blank pipeline is
+# enough: load(lang, nlp=spacy.blank(lang))
 def load(lang, nlp=None, model=None):
     # Make sure the language is supported
     supported = {"en", "sl"}
