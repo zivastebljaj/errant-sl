@@ -178,7 +178,8 @@ def merge_rewritten_clauses(edits, alignment):
         return any(a <= e.o_start and e.o_end <= b and c <= e.c_start and e.c_end <= d
             for a, b, c, d in merged)
     out = [e for e in edits if not inside(e)]
-    out += [Edit(alignment.orig, alignment.cor, span) for span in merged]
+    # The classifier keeps the preset type (one rewritten clause = S-REWRITE)
+    out += [Edit(alignment.orig, alignment.cor, span, "S-REWRITE") for span in merged]
     return sorted(out, key=lambda e: (e.o_start, e.o_end, e.c_start))
 
 # Input 1: Tokens on one side of a span

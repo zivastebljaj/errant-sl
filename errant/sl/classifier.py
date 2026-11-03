@@ -1,6 +1,7 @@
 from pathlib import Path
 from rapidfuzz.distance import Levenshtein
 import spacy.symbols as POS
+from errant.sl.merger import is_conn, is_ref
 
 base_dir = Path(__file__).resolve().parent
 
@@ -30,7 +31,7 @@ rare_pos = {"INTJ", "NUM", "SYM", "X"}
 dep_map = {
     "amod": "ADJ",
     "advmod": "ADV",
-    "det": "DET",
+    "det": "PRON",
     "case": "PREP",
     "punct": "PUNCT"}
 # Dependency relations that mark an auxiliary (covers both "aux:pass" (UD v2)
@@ -69,15 +70,40 @@ def close_text(a, b):
 # the surface spelling; tolerates lemmatizer noise rather than requiring an
 # exact match.
 def close_lemma(o_tok, c_tok):
-    if o_tok.lemma == c_tok.lemma:
+    if same_lemma(o_tok, c_tok):
         return True
     return Levenshtein.normalized_similarity(o_tok.lemma_.lower(), c_tok.lemma_.lower()) > LEMMA_SIM_THRESHOLD
+
+# Input 1: Spacy orig token
+# Input 2: Spacy cor token
+# Output: Boolean; the lemmas are identical, ignoring case
+def same_lemma(o_tok, c_tok):
+    return o_tok.lemma_.lower() == c_tok.lemma_.lower()
+
+# Input 1: The orig label POS
+# Input 2: The cor label POS
+# Output: The vocabulary label: V-<POS> if both sides have the same POS,
+# V otherwise (O-PUNCT for punctuation)
+def label_vocab(o_pos, c_pos):
+    if c_pos == "PUNCT": return "O-PUNCT"
+    return "V-" + c_pos if o_pos == c_pos else "V"
 
 # Input: An Edit object
 # Output: The same Edit object with an updated error type
 def classify(edit):
+    # Rewritten clause, preset by the merger; only the operation is added,
+    # unless the span is only a whitespace / case change or a reordering
+    if edit.type == "S-REWRITE":
+        if edit.o_toks and edit.c_toks and only_orth_change(edit.o_toks, edit.c_toks):
+            edit.type = "R:"+get_orth_subtype(edit.o_toks, edit.c_toks)
+        elif edit.o_toks and edit.c_toks and exact_reordering(edit.o_toks, edit.c_toks):
+            edit.type = "R:S-WO"
+        elif edit.o_toks and edit.c_toks and get_span_type(edit.o_toks, edit.c_toks):
+            edit.type = "R:"+get_span_type(edit.o_toks, edit.c_toks)
+        else:
+            edit.type = get_op(edit)+"S-REWRITE"
     # Nothing to nothing is a detected but not corrected edit
-    if not edit.o_toks and not edit.c_toks:
+    elif not edit.o_toks and not edit.c_toks:
         edit.type = "UNK"
     # Missing
     elif not edit.o_toks and edit.c_toks:
@@ -117,18 +143,35 @@ def classify(edit):
             edit.type = op+cat
     return edit
 
+# Input: An Edit object
+# Output: The operation prefix from the span: "M:", "U:" or "R:"
+def get_op(edit):
+    if not edit.o_toks: return "M:"
+    if not edit.c_toks: return "U:"
+    return "R:"
+
+# Input: A Spacy token
+# Output: The label POS of the token. A token without letters or digits is
+# punctuation. UD POS renamed for readability (as upstream ERRANT), plus
+# Slovene grammar: determiners and the relative ki
+# are pronouns (zaimki), coordinating and subordinating conjunctions are one
+# class (vezniki)
+def label_pos_of(tok):
+    if not any(ch.isalnum() for ch in tok.text): return "PUNCT"
+    if tok.lower_ == "ki": return "PRON"
+    if tok.pos_ == "ADP": return "PREP"
+    if tok.pos_ == "PROPN": return "NOUN"
+    if tok.pos_ == "DET": return "PRON"
+    if tok.pos_ in {"CCONJ", "SCONJ"}: return "CONJ"
+    return tok.pos_
+
 # Input: Spacy tokens
 # Output: A list of pos and dep tag strings
 def get_edit_info(toks):
     pos = []
     dep = []
     for tok in toks:
-        # Spacy's Universal POS tag (tok.pos_) is already language-agnostic;
-        # rename a few categories for readability, same as upstream ERRANT.
-        if tok.pos_ == "ADP": pos.append("PREP")
-        elif tok.pos_ == "PROPN": pos.append("NOUN")
-        elif tok.pos_ == "CCONJ": pos.append("CONJ")
-        else: pos.append(tok.pos_)
+        pos.append(label_pos_of(tok))
         dep.append(tok.dep_)
     return pos, dep
 
@@ -138,11 +181,16 @@ def get_edit_info(toks):
 def get_one_sided_type(toks):
     # Extract pos tags and parse info from the toks
     pos_list, dep_list = get_edit_info(toks)
+    # Punctuation next to a word belongs to it: [, da], [To ,]
+    if set(pos_list) != {"PUNCT"}:
+        dep_list = [d for p, d in zip(pos_list, dep_list) if p != "PUNCT"]
+        pos_list = [p for p in pos_list if p != "PUNCT"]
     # Auxiliary verbs
     if set(dep_list).issubset(aux_deps):
-        return "M-VERB"
-    # POS-based tags. Ignores rare, uninformative categories
-    if len(set(pos_list)) == 1 and pos_list[0] not in rare_pos:
+        return "M-AUX"
+    # POS-based tags. Ignores rare, uninformative categories; a missing /
+    # unnecessary numeral is informative: [eden razlog -> razlog]
+    if len(set(pos_list)) == 1 and pos_list[0] not in rare_pos - {"NUM"}:
         return label_pos(pos_list[0])
     # More POS-based tags using special dependency labels
     if len(set(dep_list)) == 1 and dep_list[0] in dep_map.keys():
@@ -150,9 +198,11 @@ def get_one_sided_type(toks):
     # Verb-related non-finite constructions
     if set(pos_list) == {"PART", "VERB"}:
         return label_pos("VERB")
+    # A missing / unnecessary phrase of mixed POS is a structural change
+    if len(pos_list) > 1 and "PUNCT" not in pos_list:
+        return "S-REWRITE"
     # Tricky cases
-    else:
-        return "OTHER"
+    return "OTHER"
 
 # Input 1: Spacy orig tokens
 # Input 2: Spacy cor tokens
@@ -172,17 +222,28 @@ def get_two_sided_type(o_toks, c_toks):
     # entries so the lemma/Sloleks checks below can't catch these.
     if is_prep_confusion(o_toks, c_toks):
         return "O-SPELL"
+    # Units the merger keeps together (phrase <-> pronoun)
+    span_type = get_span_type(o_toks, c_toks)
+    if span_type:
+        return span_type
 
     # 1:1 replacements (very common)
     if len(o_toks) == len(c_toks) == 1:
+        # Punctuation <-> conjunction: how clauses are linked, either
+        # direction: [, -> in], [in -> ,]
+        if {o_pos[0], c_pos[0]} == {"PUNCT", "CONJ"}:
+            return "S-CONJ"
         o_in, c_in = in_sloleks(o_toks[0].text), in_sloleks(c_toks[0].text)
 
         if o_in and c_in:
             # 1. MORPHOLOGY: both confirmed real words, close lemma, same POS
             if close_lemma(o_toks[0], c_toks[0]) and o_pos[0] == c_pos[0]:
                 return "O-PUNCT" if o_pos[0] == "PUNCT" else "M-" + o_pos[0]
+            # Same lemma but the POS differs: morphology without a POS
+            if same_lemma(o_toks[0], c_toks[0]) and "PUNCT" not in {o_pos[0], c_pos[0]}:
+                return "M"
             # 2. VOCABULARY: both confirmed real words, not the same word
-            return "O-PUNCT" if c_pos[0] == "PUNCT" else "V-" + c_pos[0]
+            return label_vocab(o_pos[0], c_pos[0])
 
         if o_in != c_in:
             # 3. SPELLING: one confirmed word, one not, close surface text ->
@@ -193,7 +254,7 @@ def get_two_sided_type(o_toks, c_toks):
             if close_text(o_toks[0].text, c_toks[0].text):
                 return "O-SPELL"
             # 4. VOCABULARY: one confirmed word, one not, not the same word
-            return "O-PUNCT" if c_pos[0] == "PUNCT" else "V-" + c_pos[0]
+            return label_vocab(o_pos[0], c_pos[0])
 
         # neither in Sloleks -> fall through to the GENERAL/STRING
         # SIMILARITY fallback below
@@ -201,7 +262,7 @@ def get_two_sided_type(o_toks, c_toks):
         # 4. GENERAL
         # Auxiliaries with different lemmas
         if o_dep[0].startswith("aux") and c_dep[0].startswith("aux"):
-            return "M-VERB"
+            return "M-AUX"
         # POS-based tags. Some of these are context sensitive mispellings.
         if o_pos == c_pos and o_pos[0] not in rare_pos:
             return "O-PUNCT" if o_pos[0] == "PUNCT" else "V-" + o_pos[0]
@@ -209,14 +270,6 @@ def get_two_sided_type(o_toks, c_toks):
         if o_dep == c_dep and o_dep[0] in dep_map.keys():
             mapped = dep_map[o_dep[0]]
             return "O-PUNCT" if mapped == "PUNCT" else "V-" + mapped
-        # Can use dep labels to resolve DET + PRON combinations.
-        if set(o_pos+c_pos) == {"DET", "PRON"}:
-            # DET cannot be a subject or object.
-            if c_dep[0] in {"nsubj", "nsubj:pass", "obj", "iobj", "obl"}:
-                return "V-PRON"
-        # NUM and DET are usually DET; e.g. a <-> one
-        if set(o_pos+c_pos) == {"NUM", "DET"}:
-            return "V-DET"
 
         # 5. STRING SIMILARITY
         # Generic Levenshtein-based fallback; no language-specific tuning.
@@ -227,35 +280,49 @@ def get_two_sided_type(o_toks, c_toks):
         # Tricky cases
         return "OTHER"
 
-    # Multi-token replacements (uncommon)
-    # All auxiliaries
-    if set(o_dep+c_dep).issubset(aux_deps):
-        return "M-VERB"
-    # All same POS
-    if len(set(o_pos+c_pos)) == 1:
-        # Final verbs with the same lemma are tense; e.g. eat -> has eaten
-        if o_pos[0] == "VERB" and \
-                o_toks[-1].lemma == c_toks[-1].lemma:
-            return "M-VERB"
-        # POS-based tags.
-        elif o_pos[0] not in rare_pos:
-            return "O-PUNCT" if o_pos[0] == "PUNCT" else "V-" + o_pos[0]
-    # All same special dep labels.
-    if len(set(o_dep+c_dep)) == 1 and \
-            o_dep[0] in dep_map.keys():
-        mapped = dep_map[o_dep[0]]
-        return "O-PUNCT" if mapped == "PUNCT" else "V-" + mapped
-    # Verb-related non-finite constructions.
-    if set(o_pos+c_pos) == {"PART", "VERB"}:
-        # Final verbs with the same lemma are form; e.g. to eat -> eating
-        if o_toks[-1].lemma == c_toks[-1].lemma:
-            return "M-VERB"
-        # Remaining edits are often verb
-        else:
-            return "V-VERB"
-
-    # Tricky cases.
+    # Multi-token replacements: the merger only builds these for rewrites,
+    # phrase <-> pronoun, connectors and spacing, all handled above
     return "OTHER"
+
+# Input 1: Spacy orig tokens
+# Input 2: Spacy cor tokens
+# Output: The label of a non-decomposable unit the merger keeps as one edit,
+# or None. Same tests as the merger, so both agree on these spans.
+def get_span_type(o_toks, c_toks):
+    # ki <-> kateri: a choice between two equivalent relative pronouns, i.e.
+    # vocabulary: [kateri -> ki], [kateremu -> ki mu], [ki -> s katerim]
+    if is_ki_kateri(o_toks, c_toks) or is_ki_kateri(c_toks, o_toks):
+        return "V-PRON"
+    # A phrase replaced by a single pronoun, or the reverse: [te vere pa ->
+    # katere], [kateremu -> ki mu]. A bound form against preposition +
+    # pronoun is a pronoun form, not a reference change: [za njih -> zanj]
+    for a, b in ((o_toks, c_toks), (c_toks, o_toks)):
+        if is_ref(a, b):
+            if "Bound" in a[0].morph.get("Variant") and \
+                    any(tok.pos in {POS.PRON, POS.DET} for tok in b):
+                return "M-PRON"
+            return "S-REF"
+    # A multi-word connector replaced by a single one, or the reverse:
+    # [za kar -> zato], [ker -> kljub temu da]. The relative ki is a
+    # pronoun in Slovene grammar: [ki -> s katerim] is a reference change
+    for a, b in ((o_toks, c_toks), (c_toks, o_toks)):
+        if is_conn(a, b):
+            return "S-REF" if a[0].lower_ == "ki" else "V-CONJ"
+    return None
+
+# Input 1: Tokens on one side of an edit
+# Input 2: Tokens on the other side
+# Output: True if a has the relative ki and b a form of kateri (matched on
+# the form, kater-, since the lemmatiser often leaves these unlemmatised),
+# and both sides are only function words: [ki -> s katerim], not [katere
+# imenuju -> ki jih imenujejo]
+def is_ki_kateri(a, b):
+    if any(tok.pos not in {POS.PRON, POS.DET, POS.ADP, POS.SCONJ, POS.PUNCT}
+            for tok in list(a)+list(b)):
+        return False
+    return any(tok.lower_ == "ki" for tok in a) and \
+        not any(tok.lower_.startswith("kater") for tok in a) and \
+        any(tok.lower_.startswith("kater") for tok in b)
 
 # Input 1: Spacy orig tokens
 # Input 2: Spacy cor tokens
