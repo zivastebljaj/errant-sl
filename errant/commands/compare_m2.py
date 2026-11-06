@@ -85,6 +85,13 @@ def parse_args():
         help="Only evaluate multi token edits; i.e. 2+:n or n:2+",
         action="store_true")
     parser.add_argument(
+        "-group",
+        help="Score groups (G<n>=<op>:<label> in the comment field) as units.\n"
+            "A group matches only if all its member edits match; its category\n"
+            "is the group label without the operation (e.g. M-MOOD).\n"
+            "Ungrouped edits are units of their own with their word label.",
+        action="store_true")
+    parser.add_argument(
         "-filt",
         help="Do not evaluate the specified error types.",
         nargs="+",
@@ -100,10 +107,13 @@ def parse_args():
         choices=[1, 2, 3, 4],
         type=int)
     args = parser.parse_args()
+    if args.group and (args.dt or args.ds):
+        parser.error("-group is not supported with -dt / -ds")
     return args
 
 # Input: An m2 format sentence with edits.
-# Output: A list of lists. Each edit: [start, end, cat, cor, coder]
+# Output: A list of lists. Each edit: [start, end, cat, cor, coder, group]
+# group = (group id, group op:label) or None
 def simplify_edits(sent):
     out_edits = []
     # Get the edit lines from an m2 block.
@@ -118,17 +128,26 @@ def simplify_edits(sent):
         cat = edit[1]
         cor = edit[2]
         coder = int(edit[-1])
-        out_edit = [start, end, cat, cor, coder]
+        group = parse_group(edit[4]) if len(edit) > 5 else None
+        out_edit = [start, end, cat, cor, coder, group]
         out_edits.append(out_edit)
     return out_edits
 
-# Input 1: A list of edits. Each edit: [start, end, cat, cor, coder]
+# Input: The comment field of an M2 edit; e.g. G1=R:M-GOV or -NONE-
+# Output: (group id, group op:label), or None if the edit has no group
+def parse_group(comment):
+    if not comment.startswith("G") or "=" not in comment: return None
+    gid, label = comment[1:].split("=", 1)
+    return int(gid), label
+
+# Input 1: A list of edits. Each edit: [start, end, cat, cor, coder, group]
 # Input 2: Command line args
 # Output: A dict; key is coder, value is edit dict.
 def process_edits(edits, args):
+    if args.group: return process_units(edits, args)
     coder_dict = {}
     # Add an explicit noop edit if there are no edits.
-    if not edits: edits = [[-1, -1, "noop", "-NONE-", 0]]
+    if not edits: edits = [[-1, -1, "noop", "-NONE-", 0, None]]
     # Loop through the edits
     for edit in edits:
         # Name the edit elements for clarity
@@ -195,6 +214,40 @@ def process_edits(edits, args):
                     coder_dict[coder][(start, end, cor)] = [cat]
     return coder_dict
 
+# Input 1: A list of edits. Each edit: [start, end, cat, cor, coder, group]
+# Input 2: Command line args
+# Output: A dict; key is coder, value is unit dict. A unit is a group (category
+# = group label without the operation), or an
+# ungrouped edit on its own; key = sorted member (start, end, cor) tuples
+# (the unit category first with -cse), value = [unit category]
+def process_units(edits, args):
+    coder_dict = {}
+    # Add an explicit noop edit if there are no edits.
+    if not edits: edits = [[-1, -1, "noop", "-NONE-", 0, None]]
+    # Collect the members and category of each unit per coder
+    units = {}
+    for k, (start, end, cat, cor, coder, group) in enumerate(edits):
+        if coder not in coder_dict: coder_dict[coder] = {}
+        # UNK type edits are only useful for detection, not correction.
+        if cat == "UNK": continue
+        uid = ("G", group[0]) if group else ("E", k)
+        if (coder, uid) not in units:
+            # Groups are scored without the operation; e.g. R:M-MOOD -> M-MOOD
+            units[(coder, uid)] = [[], group[1].split(":", 1)[-1] if group else cat]
+        units[(coder, uid)][0].append((start, end, cor))
+    for (coder, _), (members, cat) in units.items():
+        # Only evaluate single token units; i.e. one 0:1, 1:0 or 1:1 edit
+        single = len(members) == 1 and members[0][1]-members[0][0] < 2 \
+            and len(members[0][2].split()) < 2
+        if args.single and not single: continue
+        if args.multi and single: continue
+        # If there is a filter, ignore the specified unit categories
+        if args.filt and cat in args.filt: continue
+        key = tuple(sorted(members))
+        if args.cse: key = (cat,) + key
+        coder_dict[coder].setdefault(key, []).append(cat)
+    return coder_dict
+
 # Input 1: A hyp dict; key is coder_id, value is dict of processed hyp edits.
 # Input 2: A ref dict; key is coder_id, value is dict of processed ref edits.
 # Input 3: A dictionary of the best corpus level TP, FP and FN counts so far.
@@ -244,8 +297,8 @@ def evaluate_edits(hyp_dict, ref_dict, best, sent_id, original_sentence, args):
                 hyp_verb = [h + (hyp_dict[hyp_id][h][0],) for h in hyp_verb]
                 ref_verb = [r + (ref_dict[ref_id][r][0],) for r in ref_verb]
                 # Ignore noop edits
-                if not hyp_verb or hyp_verb[0][0] == -1: hyp_verb = []
-                if not ref_verb or ref_verb[0][0] == -1: ref_verb = []
+                hyp_verb = [h for h in hyp_verb if h[-1] != "noop"]
+                ref_verb = [r for r in ref_verb if r[-1] != "noop"]
                 # Print verbose info
                 print('{:-^40}'.format(""))
                 print("SENTENCE "+str(sent_id)+" - HYP "+str(hyp_id)+" - REF "+str(ref_id))
@@ -343,9 +396,11 @@ def processCategories(cat_dict, setting):
     # Otherwise, do some processing.
     proc_cat_dict = {}
     for cat, cnt in cat_dict.items():
-        if cat == "UNK":
+        # Group labels (-group) have no operation; kept as is in setting 1
+        if cat == "UNK" or (setting == 1 and ":" not in cat):
             proc_cat_dict[cat] = cnt
             continue
+        main = cat.split(":", 1)[-1]
         # M, U, R or UNK combined only.
         if setting == 1:
             if cat[0] in proc_cat_dict.keys():
@@ -354,13 +409,13 @@ def processCategories(cat_dict, setting):
                 proc_cat_dict[cat[0]] = cnt
         # Everything without M, U or R.
         elif setting == 2:
-            if cat[2:] in proc_cat_dict.keys():
-                proc_cat_dict[cat[2:]] = [x+y for x, y in zip(proc_cat_dict[cat[2:]], cnt)]
+            if main in proc_cat_dict.keys():
+                proc_cat_dict[main] = [x+y for x, y in zip(proc_cat_dict[main], cnt)]
             else:
-                proc_cat_dict[cat[2:]] = cnt
+                proc_cat_dict[main] = cnt
         # Level prefix of the main tier only; e.g. R:M-NOUN -> M
         elif setting == 4:
-            level = cat[2:].split("-")[0]
+            level = main.split("-")[0]
             if level in proc_cat_dict.keys():
                 proc_cat_dict[level] = [x+y for x, y in zip(proc_cat_dict[level], cnt)]
             else:

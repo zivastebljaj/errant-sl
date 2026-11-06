@@ -22,8 +22,8 @@ FEAT_TYPES = [("Case", "CASE"), ("Number", "NUM"), ("Number[psor]", "NUM"),
 # Group types, most specific first: verb categories, then adjective ones,
 # then nominal ones; person before number (2sg -> 1pl is a person error).
 # The group label is the first type the group has.
-PRIORITY = ["SFORM", "MOOD", "VFORM", "TENSE", "ASP", "REFL", "DEG", "DEF", "GOV", "CASE",
-    "PRS", "NUM", "GEND", "MORPH"]
+PRIORITY = ["SFORM", "MOOD", "VFORM", "TENSE", "ASP", "REFL", "DEG", "DEF", "GOV", "PFORM",
+    "CASE", "PRS", "NUM", "GEND", "MORPH"]
 # Reflexive clitics; se <-> si is reflexivity, sebe <-> sabo is case
 REFL_CLITICS = {"se", "si"}
 # Analytic comparison
@@ -41,6 +41,27 @@ VERBS = {"VERB", "AUX"}
 NP_MODS = {"amod", "det", "nummod"}
 # Agreement features a bridge edit can pass on, and their group types
 BRIDGE_FEATS = {"Case": "CASE", "Number": "NUM", "Gender": "GEND", "Person": "PRS"}
+# Case/Number readings of the long and short personal pronoun forms
+# (reflexive: no number); bound forms (zanj, vame) take the tagger's
+_GA, _DL = ("Gen", "Acc"), ("Dat", "Loc")
+def _r(num, *cases): return {f"{c}/{num}" for c in cases}
+PRON_READINGS = {
+    "mene": _r("Sing", *_GA), "me": _r("Sing", *_GA), "meni": _r("Sing", *_DL),
+    "mi": _r("Sing", "Dat") | _r("Plur", "Nom"), "mano": _r("Sing", "Ins"), "menoj": _r("Sing", "Ins"),
+    "tebe": _r("Sing", *_GA), "te": _r("Sing", *_GA), "tebi": _r("Sing", *_DL),
+    "ti": _r("Sing", "Dat", "Nom"), "tabo": _r("Sing", "Ins"), "teboj": _r("Sing", "Ins"),
+    "sebe": _r("-", *_GA), "se": _r("-", "Acc"), "sebi": _r("-", *_DL), "si": _r("-", "Dat"),
+    "sabo": _r("-", "Ins"), "seboj": _r("-", "Ins"),
+    "njega": _r("Sing", *_GA), "ga": _r("Sing", *_GA), "njemu": _r("Sing", "Dat"),
+    "mu": _r("Sing", "Dat"), "njem": _r("Sing", "Loc"), "njim": _r("Sing", "Ins") | _r("Plur", "Dat"),
+    "nje": _r("Sing", "Gen") | _r("Plur", "Acc"), "je": _r("Sing", "Gen"),
+    "njo": _r("Sing", "Acc", "Ins"), "jo": _r("Sing", "Acc"), "njej": _r("Sing", *_DL),
+    "nji": _r("Sing", *_DL), "ji": _r("Sing", "Dat"),
+    "njiju": _r("Dual", *_GA, "Loc"), "ju": _r("Dual", *_GA), "njima": _r("Dual", "Dat", "Ins"),
+    "jima": _r("Dual", "Dat"),
+    "njih": _r("Plur", *_GA, "Loc"), "jih": _r("Plur", *_GA), "jim": _r("Plur", "Dat"),
+    "njimi": _r("Plur", "Ins"),
+}
 # Heads that can link their agreeing dependents when they don't change
 # themselves (syncretism): [svojem strokovnem štabu -> svojemu strokovnemu štabu]
 NOMINAL = {"NOUN", "PROPN", "ADJ", "PRON", "DET", "NUM"}
@@ -62,6 +83,48 @@ def word_pairs(o, c):
         pairs = [(o[0], c[0])]
     return pairs
 
+# Input 1-2: Two tokens
+# Output: Boolean; short vs full infinitive of a verb [skrbet -> skrbeti]. The
+# short form is the supine form, but the tagger often reads it as Inf (with
+# its own lemma), so it is checked on the forms
+def short_infinitive(a, b):
+    short, full = sorted((a.lower_, b.lower_), key=len)
+    return short+"i" == full and full.endswith(("ti", "či")) and bool({a.pos_, b.pos_} & VERBS)
+
+# Input: A personal pronoun token
+# Output: Its Case/Number readings: from PRON_READINGS for the long and short
+# forms (the tagger misreads long forms: njo as Ins only), else the tagger's
+def pron_readings(tok):
+    if tok.lower_ in PRON_READINGS:
+        return PRON_READINGS[tok.lower_]
+    f = feats(tok)
+    return {f"{f.get('Case')}/{f.get('Number', '-')}"}
+
+# Input 1: orig tokens of an edit
+# Input 2: cor tokens of an edit
+# Output: Boolean; a pronoun on each side in another form (long / short /
+# bound: Variant none / Short / Bound) with a Case/Number reading in common:
+# [njemu -> mu], [njo -> jo], [v njih -> vanje], [name -> na mene]; not a case
+# change [brez jo -> brez nje]. A preposition next to a bound form must be
+# the one the bound form contains [za njega -> zanj], not [o njemu -> zanj]
+def pronoun_form(o, c):
+    for a in o:
+        for b in c:
+            if a.pos_ != "PRON" or b.pos_ != "PRON": continue
+            fa, fb = feats(a), feats(b)
+            if fa.get("Variant") == fb.get("Variant"): continue
+            keys = ["Person", "Reflex"]
+            if "Bound" not in {fa.get("Variant"), fb.get("Variant")}:
+                keys.append("Gender")
+            if any(fa.get(k) != fb.get(k) for k in keys): continue
+            if not pron_readings(a) & pron_readings(b): continue
+            bound, other = (a, c) if fa.get("Variant") == "Bound" else (b, o)
+            if feats(bound).get("Variant") == "Bound" and any(t.pos_ == "ADP" and
+                    not bound.lower_.startswith(t.lower_) for t in other):
+                continue
+            return True
+    return False
+
 # Input 1: An orig token
 # Input 2: A cor token
 # Output: The set of group types for what changed between them
@@ -69,7 +132,7 @@ def pair_types(a, b):
     fa, fb = feats(a), feats(b)
     types = {t for k, t in FEAT_TYPES if k in fa and k in fb and fa[k] != fb[k]}
     vforms = {fa.get("VerbForm"), fb.get("VerbForm")}
-    if vforms == {"Inf", "Sup"}:
+    if vforms == {"Inf", "Sup"} or short_infinitive(a, b):
         types.add("SFORM")
     if vforms == {"Fin", "Part"}:
         types.add("TENSE")
@@ -161,6 +224,8 @@ def edit_types(edit, edits, orig, cor):
     types = set()
     for a, b in word_pairs(edit.o_toks, edit.c_toks):
         types |= pair_types(a, b)
+    if pronoun_form(edit.o_toks, edit.c_toks):
+        types.add("PFORM")
     return types or {"MORPH"}
 
 # Input: A set of group types

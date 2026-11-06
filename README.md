@@ -97,12 +97,14 @@ Three main commands are provided with ERRANT: `errant_parallel`, `errant_m2` and
 3. `errant_compare`  
 
      This is the evaluation command that compares a hypothesis M2 file against a reference M2 file. The default behaviour evaluates the hypothesis overall in terms of span-based correction. The `-cat {1,2,3}` flag can be used to evaluate error types at increasing levels of granularity (`-cat 4` groups Slovene types by level: O, M, V, S), while the `-ds` or `-dt` flag can be used to evaluate in terms of span-based or token-based detection (i.e. ignoring the correction). All scores are presented in terms of Precision, Recall and F-score (default: F0.5), and counts for True Positives (TP), False Positives (FP) and False Negatives (FN) are also shown.  
+     The `-group` flag scores the Slovene morphology groups (`G<n>=<op>:<label>` in the M2 comment field, written by the grouper) instead of single edits: a group counts only if all its member edits match, and it is scored under its group label without the operation (e.g. `M-CASE`); edits outside groups are scored as before. Both M2 files must be grouped. `-group` works with the correction modes (`-cs`, `-cse`) and `-cat`, not with `-ds` / `-dt`.  
 	 Examples:
 	 ```
      errant_compare -hyp <hyp_m2> -ref <ref_m2> 
      errant_compare -hyp <hyp_m2> -ref <ref_m2> -cat {1,2,3}
      errant_compare -hyp <hyp_m2> -ref <ref_m2> -ds
      errant_compare -hyp <hyp_m2> -ref <ref_m2> -ds -cat {1,2,3}
+     errant_compare -hyp <hyp_m2> -ref <ref_m2> -group -cat 3
 	 ```	
 
 All these scripts also have additional advanced command line options which can be displayed using the `-h` flag. 
