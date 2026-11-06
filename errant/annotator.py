@@ -10,11 +10,13 @@ class Annotator:
     # Input 2: A spacy processing object for the language
     # Input 3: A merging module for the language
     # Input 4: A classifier module for the language
-    def __init__(self, lang, nlp=None, merger=None, classifier=None):
+    # Input 5: A grouper module for the language, or None
+    def __init__(self, lang, nlp=None, merger=None, classifier=None, grouper=None):
         self.lang = lang
         self.nlp = nlp
         self.merger = merger
         self.classifier = classifier
+        self.grouper = grouper
 
     # Input 1: A text string
     # Input 2: A flag for word tokenisation
@@ -76,12 +78,15 @@ class Annotator:
     # Input 2: A corrected text string parsed by spacy
     # Input 3: A flag for standard Levenshtein alignment
     # Input 4: A flag for merging strategy
+    # Input 5: A flag for grouping (languages with a grouper only)
     # Output: A list of automatically extracted, typed Edit objects
-    def annotate(self, orig, cor, lev=False, merging="rules"):
+    def annotate(self, orig, cor, lev=False, merging="rules", group=True):
         alignment = self.align(orig, cor, lev)
         edits = self.merge(alignment, merging)
         for edit in edits:
             edit = self.classify(edit)
+        if group and self.grouper:
+            edits = self.grouper.group(orig, cor, edits)
         return edits
 
     # Input 1: An original text string parsed by spacy

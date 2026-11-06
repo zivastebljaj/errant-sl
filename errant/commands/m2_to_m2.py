@@ -40,6 +40,8 @@ def main():
                     cor = annotator.parse(cor)
                     # Save detection edits here for auto
                     det_edits = []
+                    # Gold edits in input order; written after grouping
+                    out_edits = []
                     # Loop through the gold edits
                     for gold_edit in gold_edits:
                         # Do not minimise detection edits
@@ -50,16 +52,22 @@ def main():
                             edit.c_toks = annotator.parse(gold_edit[-1])
                             # Save the edit for auto
                             det_edits.append(edit)
-                            # Write the edit for gold
-                            if args.gold:
-                                # Write the edit
-                                out_m2.write(edit.to_m2(id)+"\n")
+                            # Save the edit for gold
+                            if args.gold: out_edits.append(edit)
                         # Gold annotation
                         elif args.gold:
                             edit = annotator.import_edit(orig, cor, gold_edit[:-1],
                                 not args.no_min, args.old_cats)
-                            # Write the edit
-                            out_m2.write(edit.to_m2(id)+"\n")
+                            out_edits.append(edit)
+                    # Group the gold edits of the sentence (not detection
+                    # edits; not with old categories, which the grouper
+                    # doesn't know)
+                    if annotator.grouper and not args.old_cats:
+                        annotator.grouper.group(orig, cor,
+                            [e for e in out_edits if e not in det_edits])
+                    # Write the gold edits
+                    for edit in out_edits:
+                        out_m2.write(edit.to_m2(id)+"\n")
                     # Auto annotations
                     if args.auto:
                         # Auto edits

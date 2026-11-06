@@ -30,5 +30,12 @@ def load(lang, nlp=None, model=None):
     # The classifier needs spacy
     classifier.nlp = nlp
 
+    # Load language edit grouper, if the language has one
+    try:
+        grouper = import_module(f"errant.{lang}.grouper")
+    except ModuleNotFoundError as e:
+        if e.name != f"errant.{lang}.grouper": raise
+        grouper = None
+
     # Return a configured ERRANT annotator
-    return Annotator(lang, nlp, merger, classifier)
+    return Annotator(lang, nlp, merger, classifier, grouper)

@@ -18,6 +18,11 @@ class Edit:
         self.c_str = self.c_toks.text if self.c_toks else ""
         # Error type
         self.type = type
+        # Group (second label level, set by a language grouper): group id
+        # within the sentence, group label and group operation
+        self.group = None
+        self.group_label = None
+        self.group_op = None
 
     # Minimise the edit; e.g. [a b -> a c] = [b -> c]
     def minimise(self):
@@ -46,7 +51,10 @@ class Edit:
     def to_m2(self, id=0):
         span = " ".join(["A", str(self.o_start), str(self.o_end)])
         cor_toks_str = " ".join([tok.text for tok in self.c_toks])
-        return "|||".join([span, self.type, cor_toks_str, "REQUIRED", "-NONE-", str(id)])
+        # The comment field carries the group, if any: G1=R:M-GOV
+        comment = "-NONE-" if self.group is None else \
+            f"G{self.group}={self.group_op}:{self.group_label}"
+        return "|||".join([span, self.type, cor_toks_str, "REQUIRED", comment, str(id)])
 
     # Edit object string representation
     def __str__(self):
